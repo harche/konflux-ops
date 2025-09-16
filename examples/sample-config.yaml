@@ -1,0 +1,57 @@
+context:
+  namespace: dev-tenant
+  kubeconfig: ~/.kube/config
+  context: konflux-cluster
+
+application:
+  name: demo-app
+  display_name: Demo Application
+
+components:
+  - name: web
+    application: demo-app
+    git:
+      url: https://github.com/example/demo.git
+      revision: main
+      context: services/web
+      dockerfileUrl: Containerfile
+    pipeline:
+      name: konflux-default
+      bundle: latest
+    containerImage: quay.io/example/demo-web:latest
+
+image_repositories:
+  - name: web
+    application: demo-app
+    component: web
+    image: quay.io/example/demo-web
+    visibility: public
+
+release_plan_admissions:
+  - name: sre-production
+    namespace: rhtap-releng-tenant
+    applications:
+      - demo-app
+    origin: dev-tenant
+    pipelineRef: managed-release-pipeline
+    policy: '@redhat'
+
+release_plans:
+  - name: sre-production
+    application: demo-app
+    target: rhtap-releng-tenant
+    pipelineRef: managed-release-pipeline
+    serviceAccount: release-sre
+
+releases:
+  - generateName: demo-app-release-
+    releasePlan: sre-production
+    snapshot: demo-app-2024-05-01
+    author: demo-user
+    automated: false
+
+secrets:
+  - name: quay-robot
+    type: kubernetes.io/dockerconfigjson
+    stringData:
+      .dockerconfigjson: "${QUAY_DOCKERCONFIGJSON}"

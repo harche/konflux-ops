@@ -1,0 +1,179 @@
+Metadata-Version: 2.4
+Name: konflux-automation
+Version: 0.1.0
+Summary: Automation toolkit for Konflux operations
+Author: Konflux Automation
+License: Apache-2.0
+Project-URL: Homepage, https://example.com/konflux-automation
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: kubernetes>=27.2.0
+Requires-Dist: typer>=0.9.0
+Requires-Dist: pydantic>=2.5.0
+Requires-Dist: PyYAML>=6.0
+Requires-Dist: rich>=13.0
+Requires-Dist: ruamel.yaml>=0.18
+
+# Konflux Automation Toolkit
+
+Automation and orchestration helpers for Konflux custom resources built on top of the Kubernetes API. The package
+translates the operational flows described in the Konflux documentation into repeatable Python and CLI workflows.
+
+## Features
+
+- Declarative configuration (YAML) for Applications, Components, ImageRepositories, Secrets, ReleasePlans,
+  ReleasePlanAdmissions, and Releases.
+- Safe create/update behaviour via the Kubernetes dynamic client, preserving existing metadata.
+- Pipeline controls: trigger Pipelines-as-Code rebuilds and inspect recent Tekton PipelineRuns.
+- Secret helpers for linking registry credentials to build service accounts.
+
+## Installation
+
+### Option 1: Virtual Environment (Recommended)
+
+Create and activate a virtual environment to isolate dependencies:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+To deactivate when done:
+```bash
+deactivate
+```
+
+### Option 2: System-wide Installation
+
+Use your existing Python environment (3.9 or newer):
+
+```bash
+pip install -e .
+```
+
+The toolkit depends on `kubernetes`, `typer`, `pydantic`, `PyYAML`, and `rich`. Access to the target Konflux cluster
+relies on your Kubernetes configuration (`~/.kube/config` by default).
+
+## Declarative configuration
+
+Create a YAML file describing the desired Konflux resources. Example:
+
+```yaml
+context:
+  namespace: dev-tenant
+  kubeconfig: ~/.kube/config
+  context: konflux-cluster
+
+application:
+  name: demo-app
+  display_name: Demo Application
+
+components:
+  - name: web
+    application: demo-app
+    git:
+      url: https://github.com/example/demo.git
+      revision: main
+      context: services/web
+      dockerfileUrl: Containerfile
+    pipeline:
+      name: konflux-default
+      bundle: latest
+    containerImage: quay.io/example/demo-web:latest
+
+image_repositories:
+  - name: web
+    application: demo-app
+    component: web
+    image: quay.io/example/demo-web
+    visibility: public
+
+release_plan_admissions:
+  - name: sre-production
+    namespace: rhtap-releng-tenant
+    applications: [demo-app]
+    origin: dev-tenant
+    pipelineRef: managed-release-pipeline
+    policy: '@redhat'
+
+release_plans:
+  - name: sre-production
+    application: demo-app
+    target: rhtap-releng-tenant
+    pipelineRef: managed-release-pipeline
+    serviceAccount: release-sre
+
+releases:
+  - generateName: demo-app-release-
+    releasePlan: sre-production
+    snapshot: demo-app-2024-05-01
+    author: demo-user
+
+secrets:
+  - name: quay-robot
+    type: kubernetes.io/dockerconfigjson
+    stringData:
+      .dockerconfigjson: "${QUAY_DOCKERCONFIGJSON}"
+```
+
+Apply the definition:
+
+```bash
+konflux-ops apply-config ./konflux-config.yaml
+```
+
+You can override the namespace, kubeconfig, or kube-context at the command line.
+
+## Interactive onboarding workflow
+
+Run the guided wizard when you want to avoid hand-crafting YAML:
+
+```bash
+konflux-ops onboard --repo-path /path/to/component-repo
+```
+
+The CLI will walk you through the minimum set of questions (namespace, application, component, Git repository, release
+preferences) and generate a `konflux-config.yaml` behind the scenes. It then offers to apply the configuration directly
+to the cluster and, if your repository contains a `.tekton/` directory, will update the Pipelines-as-Code definitions to:
+
+- Enable hermetic builds by default (`docs/users/building/hermetic-builds.html:739`).
+- Always build source images by setting `build-source-image` to `"true"`
+  (`docs/users/getting-started/components-applications.html:1383`).
+- Drop the expensive Coverity scan task from the pipeline
+  (`docs/users/testing/sast-tasks.html:806`).
+
+Enterprise contract validation is configured automatically when you accept the release automation prompts by injecting
+the policy field on the ReleasePlanAdmission (`docs/users/releasing/create-release-plan-admission.html:824`).
+
+## Operational commands
+
+Trigger a fresh Pipelines-as-Code build:
+
+```bash
+konflux-ops trigger-build web --namespace dev-tenant
+```
+
+Inspect the latest Tekton PipelineRuns for a component:
+
+```bash
+konflux-ops pipeline-runs web --namespace dev-tenant --limit 5
+```
+
+Link a registry secret to component build service accounts:
+
+```bash
+konflux-ops link-secret quay-robot build-pipeline-web --namespace dev-tenant
+```
+
+## Mapping to Konflux documentation
+
+- Application & Component lifecycle: `docs/users/building/creating.html`
+- Registry credentials & secret linking: `docs/users/building/creating-secrets.html`
+- Triggering Pipelines-as-Code builds: `docs/users/building/running.html`
+- ReleasePlan and ReleasePlanAdmission setup: `docs/users/releasing/create-release-plan.html`,
+  `docs/users/releasing/create-release-plan-admission.html`
+- Manual Release creation: `docs/users/releasing/create-release.html`
+
+The toolkit encodes the resource structures and workflows from those guides, providing reliable automation for
+production Konflux tenants.
