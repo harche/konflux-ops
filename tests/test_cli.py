@@ -18,3 +18,10 @@ def test_tenant_configure_subcommands() -> None:
     assert result.exit_code == 0
     for command in ("component", "release", "secret", "wizard"):
         assert command in result.stdout
+
+
+def test_component_subcommands_visible() -> None:
+    result = runner.invoke(app, ["tenant", "configure", "component", "--help"])
+    assert result.exit_code == 0
+    for command in ("add", "add-fbc"):
+        assert command in result.stdout

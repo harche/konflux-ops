@@ -50,19 +50,19 @@ konflux-ops tenant create
 ```
 
 This clones (or reuses) `git@gitlab.cee.redhat.com:releng/konflux-release-data.git` to `/tmp/konflux-release-data` (configurable with `--workdir`), collects cluster/namespace details,
-assigns admins/contributors/maintainers/codeowners, and executes `tenants-config/add-namespace.sh create`. Once finished
-it prints the follow-up steps (review the diff, commit, push, open an MR) so the namespace is provisioned via GitOps.
+assigns admins/contributors/maintainers/codeowners, and executes `tenants-config/add-namespace.sh create`. After the tenant manifests are generated, the CLI automatically runs
+`tenants-config/build-manifests.sh` so the `auto-generated/` content stays in sync. A summary of the next GitOps steps (review, commit, push, open an MR) is printed at the end.
 
 ### 2. Configure resources inside an existing tenant
 
-- `konflux-ops tenant configure component` – add an Application/Component/ImageRepository definition. Defaults are
-  autodetected from `.tekton/` and you can optionally apply the config or update Pipelines-as-Code.
+- `konflux-ops tenant configure component add` – add an Application/Component/ImageRepository definition. Defaults are
+  autodetected from `.tekton/` and you can choose whether to update Pipelines-as-Code after writing the YAML snippet.
+- `konflux-ops tenant configure component add-fbc` – generate ReleasePlan/ReleasePlanAdmission pairs for File-Based Catalog (FBC) releases (stage/prod, version labels, etc.).
 - `konflux-ops tenant configure release` – generate ReleasePlan and ReleasePlanAdmission manifests.
 - `konflux-ops tenant configure secret` – scaffold Secrets with either base64 `data` or plaintext `stringData` keys.
 - `konflux-ops tenant configure wizard` – run the end-to-end workflow (components + releases) in one session.
 
-Every subcommand emits YAML snippets (`konflux-*.yaml` by default) that you can commit to the GitOps repository or apply
-with `konflux-ops apply-config`.
+Every subcommand emits YAML snippets (`konflux-*.yaml` by default) that you can copy into the GitOps repository.
 
 ### 3. Operational helpers
 
@@ -84,13 +84,10 @@ with `konflux-ops apply-config`.
   konflux-ops secret link quay-robot build-pipeline-web --namespace dev-tenant
   ```
 
-### 4. Apply declarative configuration
+### 4. Work from declarative configuration
 
-When you already have a YAML definition, apply it directly:
-
-```bash
-konflux-ops apply-config ./konflux-config.yaml
-```
+When you already have a YAML definition, add it to your GitOps checkout under the appropriate tenant directory and rerun `tenants-config/build-manifests.sh`. Review the changes, commit,
+and open a merge request so ArgoCD applies them on the cluster.
 
 ## Declarative configuration
 
@@ -154,10 +151,7 @@ secrets:
       .dockerconfigjson: "${QUAY_DOCKERCONFIGJSON}"
 ```
 
-Apply the definition:
-
-```bash
-konflux-ops apply-config ./konflux-config.yaml
-```
+To apply the definition, place it in the GitOps repository (for example under `tenants-config/cluster/<cluster>/tenants/<tenant>/`), reference it from the tenant `kustomization.yaml`, run
+`tenants-config/build-manifests.sh`, then commit and push the resulting changes.
 
 You can override the namespace, kubeconfig, or kube-context at the command line.

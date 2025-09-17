@@ -37,6 +37,9 @@ app.add_typer(tenant_app, name="tenant")
 tenant_configure_app = typer.Typer(help="Configure resources within an existing tenant.")
 tenant_app.add_typer(tenant_configure_app, name="configure")
 
+tenant_component_app = typer.Typer(help="Component helpers for a tenant.")
+tenant_configure_app.add_typer(tenant_component_app, name="component")
+
 build_app = typer.Typer(help="Trigger and inspect Konflux build activity.")
 app.add_typer(build_app, name="build")
 
@@ -631,6 +634,26 @@ def tenant_create(
         raise typer.Exit("add-namespace.sh failed. Review the output above for details.")
 
     rich_print("\n[green]Tenant manifests generated successfully.[/green]")
+
+    build_script = tenants_dir / "build-manifests.sh"
+    if build_script.exists():
+        rich_print("[cyan]Running build-manifests.sh to refresh auto-generated manifests...[/cyan]")
+        build_result = subprocess.run(
+            ["bash", str(build_script)],
+            cwd=str(tenants_dir),
+            check=False,
+        )
+        if build_result.returncode == 0:
+            rich_print("[green]Auto-generated manifests updated.[/green]")
+        else:
+            rich_print(
+                "[yellow]build-manifests.sh reported an error; review its output and rerun manually.[/yellow]"
+            )
+    else:
+        rich_print(
+            f"[yellow]Skipping build-manifests.sh; script not found at {build_script}."
+        )
+
     rich_print("Next steps:")
     rich_print(f"  1. [cyan]cd {destination}[/cyan]")
     rich_print("  2. Review changes with `git status` and `git diff`")
@@ -638,16 +661,11 @@ def tenant_create(
     rich_print("  4. Wait for ArgoCD to apply the new tenant namespace after merge")
 
 
-@tenant_configure_app.command("component")
+@tenant_component_app.command("add")
 def tenant_add_component(
     namespace: Optional[str] = typer.Option(None, help="Tenant namespace to target."),
     repo_path: Path = typer.Option(Path("."), help="Repository containing .tekton/ for defaults."),
     output: Optional[Path] = typer.Option(None, "--output", help="Where to write the generated config."),
-    apply_config: Optional[bool] = typer.Option(
-        None,
-        "--apply/--no-apply",
-        help="Apply configuration to the cluster after generation.",
-    ),
     update_pipelines: Optional[bool] = typer.Option(
         None,
         "--update-pipelines/--skip-pipelines",
@@ -677,14 +695,6 @@ def tenant_add_component(
     _write_config_file(automation_config, output_path)
     rich_print(f"[green]Saved configuration to {output_path}.[/green]")
 
-    should_apply = apply_config if apply_config is not None else typer.confirm(
-        "Apply configuration to the cluster now?",
-        default=False,
-    )
-    if should_apply:
-        _run_apply(automation_config)
-        rich_print("[green]Configuration applied successfully.[/green]")
-
     update_choice = (
         update_pipelines
         if update_pipelines is not None
@@ -704,15 +714,85 @@ def tenant_add_component(
             )
 
 
+@tenant_component_app.command("add-fbc")
+def tenant_add_component_fbc(
+    namespace: Optional[str] = typer.Option(None, help="Tenant namespace to target."),
+    application: Optional[str] = typer.Option(None, help="Application name associated with the catalog."),
+    ocp_minor: Optional[str] = typer.Option(None, help="OCP minor version (e.g., 4.19)."),
+    stage: str = typer.Option("stage", help="Release stage (stage or prod)."),
+    output: Optional[Path] = typer.Option(None, "--output", help="Where to write the generated config."),
+    verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging."),
+) -> None:
+    """Scaffold File-Based Catalog release resources for a tenant component."""
+
+    _configure_logging(verbose)
+
+    tenant_namespace = _prompt_non_empty("Tenant namespace", default=namespace)
+    application_name = _prompt_non_empty("Application name", default=application)
+    ocp_version = _prompt_non_empty("OCP minor version (e.g., 4.19)", default=ocp_minor)
+    sanitized_version = ocp_version.replace(".", "")
+    catalog_identifier = f"{application_name}-fbc-{sanitized_version}-{stage}"
+    release_plan_name = f"{catalog_identifier}-release-plan"
+    default_target = f"{tenant_namespace}-{stage}" if stage else tenant_namespace
+    target_namespace = _prompt_non_empty("Target namespace for releases", default=default_target)
+    pipeline_ref = typer.prompt("Release pipelineRef", default="managed-release")
+    service_account = typer.prompt("Release pipeline serviceAccount", default="release-service-account")
+    auto_release = typer.confirm("Enable automatic releases when tests pass?", default=True)
+    admission_namespace = typer.prompt(
+        "ReleasePlanAdmission namespace",
+        default=target_namespace,
+    )
+    policy = typer.prompt("Enterprise contract policy", default="@redhat")
+
+    catalog_labels = {
+        "konflux.appstudio.redhat.com/catalog": catalog_identifier,
+        "konflux.appstudio.redhat.com/catalog-stage": stage,
+        "konflux.appstudio.redhat.com/catalog-version": ocp_version,
+    }
+
+    context = KonfluxContext(namespace=tenant_namespace)
+    config = AutomationConfig.model_validate(
+        {
+            "context": context.model_dump(exclude_none=True),
+            "release_plans": [
+                {
+                    "name": release_plan_name,
+                    "application": application_name,
+                    "target_namespace": target_namespace,
+                    "pipeline_ref": pipeline_ref,
+                    "service_account": service_account or None,
+                    "auto_release": auto_release,
+                    "labels": catalog_labels,
+                }
+            ],
+            "release_plan_admissions": [
+                {
+                    "name": release_plan_name,
+                    "namespace": admission_namespace,
+                    "applications": [application_name],
+                    "origin_namespace": tenant_namespace,
+                    "pipeline_ref": pipeline_ref,
+                    "policy": policy,
+                    "labels": catalog_labels,
+                }
+            ],
+        }
+    )
+
+    output_path = output or Path(
+        typer.prompt(
+            "Where should we write the generated configuration?",
+            default=f"konflux-release-{catalog_identifier}.yaml",
+        )
+    ).expanduser().resolve()
+    _write_config_file(config, output_path)
+    rich_print(f"[green]Saved FBC release configuration to {output_path}.[/green]")
+
+
 @tenant_configure_app.command("release")
 def tenant_add_release(
     namespace: Optional[str] = typer.Option(None, help="Tenant namespace containing the application."),
     output: Optional[Path] = typer.Option(None, "--output", help="Where to write the generated config."),
-    apply_config: Optional[bool] = typer.Option(
-        None,
-        "--apply/--no-apply",
-        help="Apply configuration to the cluster after generation.",
-    ),
     verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging."),
 ) -> None:
     """Add ReleasePlan and ReleasePlanAdmission definitions for an existing tenant."""
@@ -771,24 +851,11 @@ def tenant_add_release(
     _write_config_file(config, output_path)
     rich_print(f"[green]Saved configuration to {output_path}.[/green]")
 
-    should_apply = apply_config if apply_config is not None else typer.confirm(
-        "Apply configuration to the cluster now?",
-        default=False,
-    )
-    if should_apply:
-        _run_apply(config)
-        rich_print("[green]Configuration applied successfully.[/green]")
-
 
 @tenant_configure_app.command("secret")
 def tenant_add_secret(
     namespace: Optional[str] = typer.Option(None, help="Tenant namespace where the secret will live."),
     output: Optional[Path] = typer.Option(None, "--output", help="Where to write the generated config."),
-    apply_config: Optional[bool] = typer.Option(
-        None,
-        "--apply/--no-apply",
-        help="Apply configuration to the cluster after generation.",
-    ),
     verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging."),
 ) -> None:
     """Create a Konflux automation config snippet for a Kubernetes secret."""
@@ -829,21 +896,12 @@ def tenant_add_secret(
     _write_config_file(config, output_path)
     rich_print(f"[green]Saved configuration to {output_path}.[/green]")
 
-    should_apply = apply_config if apply_config is not None else typer.confirm(
-        "Apply configuration to the cluster now?",
-        default=False,
-    )
-    if should_apply:
-        _run_apply(config)
-        rich_print("[green]Configuration applied successfully.[/green]")
-
 
 @tenant_configure_app.command("wizard")
 def tenant_wizard(
     namespace: Optional[str] = typer.Option(None, help="Default namespace to pre-fill during the wizard."),
     config_path: Optional[Path] = typer.Option(None, help="Advanced: path to an existing config YAML to use instead of the wizard."),
     repo_path: Path = typer.Option(Path("."), help="Path to the component repository containing the .tekton/ directory."),
-    skip_apply: bool = typer.Option(False, help="Do not apply generated configuration to the cluster."),
     skip_pipeline: bool = typer.Option(False, help="Do not update Pipelines-as-Code files."),
     verbose: bool = typer.Option(False, "--verbose", help="Enable debug logging."),
 ) -> None:
@@ -868,11 +926,6 @@ def tenant_wizard(
         output_path = Path(path_str).expanduser().resolve()
         _write_config_file(automation_config, output_path)
         rich_print(f"[green]Saved configuration to {output_path}.[/green]")
-
-    if not skip_apply:
-        if typer.confirm("Apply configuration to the cluster now?", default=True):
-            _run_apply(automation_config)
-            rich_print("[green]Configuration applied successfully.[/green]")
 
     if not skip_pipeline:
         tweaker = PipelineTweaker(repo)
